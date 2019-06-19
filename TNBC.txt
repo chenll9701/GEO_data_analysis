@@ -1,0 +1,202 @@
+setwd("C:\\Users\\11780\\Documents\\R语言练习\\GEO dataset drill\\TNBC")
+library(stringi)
+library(GEOquery)
+library(limma)
+library(ggfortify)
+library(ggplot2)
+library(pheatmap)
+library(VennDiagram)
+library(DO.db)
+library(GO.db)
+library(DOSE)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(rtracklayer)
+library(SummarizedExperiment)
+library(GEOquery)
+GSE_name = 'GSE76275'
+options( 'download.file.method.GEOquery' = 'libcurl' )
+gset <- getGEO(GSE_name, getGPL = T )
+save( gset, file="gset.Rdata")
+options(stringsAsFactors = F)
+load('gset.Rdata')
+gset <- gset[[1]]
+exprSet <- exprs(gset)
+pdata <- pData(gset)
+group_list = as.character(pdata[,67])
+not_TN_expr = exprSet[, grep("not TN", group_list)]
+TN_expr = exprSet[, ! (colnames(exprSet) %in% colnames(not_TN_expr))] ## Very important
+group_list = c(rep("not_TN", ncol(not_TN_expr)), rep("TN", ncol(TN_expr)))
+save(exprSet, group_list, file="exprSet_by_group.Rdata")
+GPL=gset@featureData@data 
+ids <- GPL[,c(1,11)]
+ids <- ids[ ids[,2] != '',] ## to delete the null value(this step depends on the actual data)
+library("plyr")
+a <- strsplit( as.character(ids[,2]), " /// ") ## to split the character according to "///"
+tmp <- mapply(cbind, ids[,1], a)
+ID2gene <- ldply(tmp, data.frame)
+IDgene2 = ID2gene[,2:3]
+colnames( IDgene2) = c("id", "gene")
+load("Relationship_others_gene.Rdata")
+IDgene2$type = genetype2[ match( IDgene2[, 2] , genetype2[,1]),2]
+save(IDgene2, file="IDgene2.Rdata")
+load("IDgene2.Rdata")
+load("exprSet_by_group.Rdata")
+{
+  exprSet = exprSet[ which(rownames (exprSet) %in% IDgene2[,1]), ]
+  IDgene2 = IDgene2[ match(rownames (exprSet), IDgene2[,1]), ]
+}
+{ 
+  MAX = by( exprSet, IDgene2[,2], 
+             function(x) rownames(x) [ which.max(rowMeans(x))])
+  MAX = as.character(MAX)
+  exprSet = exprSet[ rownames(exprSet) %in% MAX, ]
+  rownames(exprSet) = IDgene2 [ match(rownames(exprSet), IDgene2[,1]), 2]
+ }
+save(exprSet, group_list, file= "final_exprSet.Rdata")
+library(ggfortify)
+data=as.data.frame( t(exprSet))
+data$group = group_list
+png("pca_plot.png", res=100) ## res is the nominal resolution
+autoplot( prcomp( data[,1:(ncol(data)-1)]), data=data,
+  colour= "group", label=F, frame=T)+ theme_bw() ##autoplot is a ggplot object
+## pca <- prcomp(data[,1:ncol(data)-1], tol = 0.06, rank. = 3) ##rank. is used to choose the number of pc
+## function princomp() can be used only when the number of units is more than that of variables
+## the center=T of prcomp means normalization of the data
+## pca$sdev^2 to get the variance
+## pca$$rotation to get the loadings meaning the cor() between the pc and related variables
+## remember to learn MFPCA
+dev.off()
+load("final_exprSet.Rdata")
+library(limma)
+design <- model.matrix(~0+factor ( group_list)) ## here " 0 " means no intercept
+## This is used to create a formula and a design (or model) matrix
+colnames(design) = levels(factor(group_list))
+## to provide access to the levels attribute of a variable
+rownames(design) = colnames(exprSet)
+contrast.matrix <- makeContrasts( "TN-not_TN", levels = design) ## as input to contrasts.fit()
+load("IDgene2.Rdata")
+fit <- lmFit( exprSet, design) ##
+fit2<- contrasts.fit(fit, contrast.matrix)
+## the input is a linear model fit to microarray data and output is estimated coef?cients and standard errors 
+fit2 <- eBayes(fit2)
+## the input is the output of lmFit() or contrasts.fit() and the output is moderated t-statistics, F-statistic and logodds of DE
+nrDEG = topTable ( fit2, coef = 1, n=Inf)
+## to extract a table of the top-ranked genes from a linear model fit
+## is.finite() and is.infinite() are two useful functions
+## coef means column number or column name specifying which coeficient or contrast of the linear model is of interest
+## here coef=1 means the column 1 is of interest and it is TN
+head(sort(nrDEG$logFC, decreasing=T), n=15)
+## This function can be used to view the genes according to logFC
+write.table( nrDEG, file="nrDEG.out")
+nrDEG = read.table("nrDEG.txt")
+library(pheatmap)
+nrDEG_Z = nrDEG[order(nrDEG$logFC),]
+nrDEG_F = nrDEG[order(-nrDEG$logFC),]
+choose_gene = c(rownames(nrDEG_Z)[1:100], rownames(nrDEG_F)[1:100])
+choose_matrix = exprSet[ choose_gene, ]
+choose_matrix = t(scale(t(exprSet)))
+## function scale is used to center or scale a matrix (acoording to row).
+## center means deducting the average in the matrix 
+## scale means dividing the sdev in the centered matrix
+## scale( x, center=T, scale=T)
+## it is worth thinking that the transpose is used twice
+choose_matrix[ choose_matrix > 1 ] = 1
+choose_matrix[ choose_matrix < -1] = -1
+annotation_col = data.frame(CellType=factor(group_list))
+rownames( annotation_col) = colnames(exprSet)
+pheatmap( fontsize=2, choose_matrix, annotation_col = annotation_col, show_rownames=F,
+          annotation_legend=T, filename="heatmap_TNBC1.png") 
+## the "pheatmap" has only one function pheatmap() and it has many parameters to set
+## the fontsize needs modifying since it is too samll 
+## the heatmap code needs modifying since it is too slow
+library(ggplot2)
+logFC_cutoff <- with( nrDEG, mean( abs(logFC))+2*sd(abs(logFC)))
+## the function of with() is similar to attach()
+## while the attach() should appear together with detach() to avoid the same name(colname and ls)
+## with() creates a confined environment which will not conflict with the present variable names
+## mean+2SD可以反映95%以上的观测值，这是比较可信的，如果再严格一点，设为mean+3SD，就可以反映97%以上的观测
+logFC_cutoff
+logFC_cutoff = 1.5
+nrDEG$change = as.factor(ifelse(nrDEG$P.Value < 0.01 & abs(nrDEG$logFC) > logFC_cutoff, 
+                         ifelse(nrDEG$logFC > logFC_cutoff, "UP", "DOWN"), "NOT"))
+save(nrDEG, file="nrDEG.Rdata")
+this_title <- paste0("Cutoff for logFC is ", round(logFC_cutoff, 3),
+                       "\nThe number of up gene is ", nrow(nrDEG[nrDEG$change == "UP",]),
+					   "\nThe number of down gene is", nrow(nrDEG[nrDEG$change == "DOWN",]))
+## the function paste0() is equal to paste( , sep="", collapse)
+volcano = ggplot(data=nrDEG, aes(x= logFC, y= -log10(P.Value), color=change))+
+                   geom_point(alpha = 0.4, size=1.75) +
+				   theme_set(theme_set(theme_bw(base_size = 15)))+
+				   xlab("log2 fold change")+ylab("-log10 p-value")+
+				   ggtitle(this_title)+theme(plot.title = element_text(size=15, hjust=0.5))+
+				   scale_colour_manual(values=c("blue","black", "red"))
+print(volcano)
+ggsave(volcano, filename="volcano_TNBC.png")
+dev.off()
+###Annotation###
+library(clusterProfiler)
+library(org.Hs.eg.db)
+df <- bitr(rownames(nrDEG), fromType="SYMBOL", toType= c("ENTREZID"), OrgDb=org.Hs.eg.db)
+head(df)
+{
+  nrDEG$SYMBOL = rownames(nrDEG)
+  nrDEG = merge(nrDEG, df, by="SYMBOL")
+}
+head(nrDEG)
+{
+  gene_up = nrDEG[nrDEG$change == "UP", "ENTREZID"]
+  gene_down = nrDEG[nrDEG$change == "DOWN", "ENTREZID"]
+  gene_diff = c(gene_up, gene_down)
+  gene_all = as.character(nrDEG[,"ENTREZID"])
+}
+{
+  geneList = nrDEG$logFC
+  names(geneList) = nrDEG$ENTREZID
+  geneList = sort(geneList, decreasing= T)
+}
+##KEGG pathway analysis
+{
+kk.up <- enrichKEGG(  gene = gene_up,
+                      organism = 'hsa',
+					  universe = gene_all,
+					  pvalueCutoff = 0.8,
+					  qvalueCutoff = 0.8)
+kk.down <- enrichKEGG(  gene = gene_down,
+                        organism = 'hsa',
+						universe = gene_all,
+						pvalueCutoff = 0.8,
+						qvalueCutoff = 0.8)
+}
+head(kk.up[,1:6])
+head(kk.down[,1:6])
+library(ggplot2)
+{
+  kegg_down_dt <- as.data.frame(kk.down)
+  kegg_up_dt <- as.data.frame(kk.up)
+  down_kegg <- kegg_down_dt[kegg_down_dt$pvalue < 0.05,]
+  down_kegg$group = -1
+  up_kegg <- kegg_up_dt[kegg_up_dt$pvalue < 0.05,]
+  up_kegg$group = 1
+  dat = rbind ( up_kegg, down_kegg )
+  dat$pvalue = -log10(dat$pvalue)
+  dat$pvalue = dat$pvalue * dat$group
+  dat = dat[order(dat$pvalue, decreasing=F),]
+  g_kegg <- ggplot(dat, aes(x=reorder(Description, order(pvalue, decreasing=F)), y=pvalue, fill= group))+ 
+           geom_bar(stat = "identity")+
+		   scale_fill_gradient(low="blue", high= "red", guide= F)+
+		   scale_x_discrete(name='Pathway name')+
+		   scale_y_continuous(name="log10P-value") +
+		   coord_flip() + theme_bw() + theme( plot.title = element_text( hjust = 0.5))+
+		   ggtitle( "Pathway Enrichment")
+  print(g_kegg)
+  ggsave( g_kegg, filename= "kegg_up_down.png")
+}
+  
+
+
+					  
+
+
+
+
